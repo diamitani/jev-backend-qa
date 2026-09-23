@@ -1,0 +1,108 @@
+name: "Jev Backend QA"
+description: >-
+  Backend QA for Jev-powered builds: deterministic scan, PAL/Jev-adjudicated
+  verdict (BLOCK/WARN/PASS), fix proposals, and optional Rostr upload.
+author: "Diamitani Industries"
+
+inputs:
+  target:
+    description: "Path to the repo to QA (relative to the workflow workspace)."
+    default: "."
+  gateway-key:
+    description: >-
+      Vercel AI Gateway key. Enables PAL adjudication (Jev) and fix
+      proposals. Without it the scan still runs; findings stay
+      unadjudicated.
+    default: ""
+  suggest-fixes:
+    description: "Generate LLM fix proposals for confirmed findings."
+    default: "true"
+  rostr-project:
+    description: "Upload the QA run to this Rostr project (needs the backend-qa agent registered)."
+    default: ""
+  rostr-url:
+    description: "Rostr platform base URL."
+    default: "https://rostr-platform.vercel.app"
+  fail-on-block:
+    description: "Fail the job when the verdict is BLOCK."
+    default: "true"
+  comment-on-pr:
+    description: "Post the verdict as a comment on the pull request."
+    default: "true"
+
+outputs:
+  verdict:
+    description: "BLOCK, WARN, PASS, or UNADJUDICATED."
+    value: ${{ steps.qa.outputs.verdict }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Set up Node (PAL bridge)
+      if: inputs.gateway-key != ''
+      uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+
+    - name: Install bridge dependencies
+      if: inputs.gateway-key != ''
+      shell: bash
+      run: cd "${{ github.action_path }}/agent" && npm install --no-audit --no-fund
+
+    - name: Run jev-qa
+      id: qa
+      shell: bash
+      env:
+        AI_GATEWAY_API_KEY: ${{ inputs.gateway-key }}
+        ROSTR_URL: ${{ inputs.rostr-url }}
+      run: |
+        set +e
+        ARGS=("${{ inputs.target }}" --report-dir "${{ github.action_path }}/qa-report" --format both)
+        if [ "${{ inputs.suggest-fixes }}" != "true" ]; then ARGS+=(--no-suggest-fixes); fi
+        if [ -n "${{ inputs.rostr-project }}" ]; then ARGS+=(--rostr-project "${{ inputs.rostr-project }}"); fi
+        python3 "${{ github.action_path }}/agent/cli.py" "${ARGS[@]}"
+        CODE=$?
+        echo "exit=$CODE" >> "$GITHUB_OUTPUT"
+        VERDICT=$(REPORT_DIR="${{ github.action_path }}/qa-report" python3 -c "import json,os;print(json.load(open(os.path.join(os.environ['REPORT_DIR'],'qa-report.json')))['verdict'])")
+        echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+        echo "## Backend QA: $VERDICT" >> "$GITHUB_STEP_SUMMARY"
+        exit 0
+
+    - name: Upload QA report
+      uses: actions/upload-artifact@v4
+      with:
+        name: qa-report
+        path: ${{ github.action_path }}/qa-report/
+
+    - name: Comment verdict on PR
+      if: inputs.comment-on-pr == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        REPORT="${{ github.action_path }}/qa-report"
+        VERDICT=$(REPORT_DIR="$REPORT" python3 -c "import json,os;print(json.load(open(os.path.join(os.environ['REPORT_DIR'],'qa-report.json')))['verdict'])")
+        case "$VERDICT" in
+          BLOCK) BADGE="🛑 **BLOCK** — do not merge" ;;
+          WARN)  BADGE="⚠️ **WARN** — review before merge" ;;
+          PASS)  BADGE="✅ **PASS** — clear to merge" ;;
+          *)     BADGE="🔍 **UNADJUDICATED** — scan ran without Jev; review manually" ;;
+        esac
+        BODY="## Backend QA verdict: $BADGE"$'\n\n'"$(sed -n '1,60p' "$REPORT/qa-report.md")"$'\n\n'"Full HTML report in the *qa-report* workflow artifact."
+        gh pr comment "${{ github.event.pull_request.number }}" --body "$BODY"
+
+    - name: Enforce BLOCK gate
+      if: inputs.fail-on-block == 'true' && steps.qa.outputs.exit == '2'
+      shell: bash
+      run: |
+        echo "::error::jev-qa verdict is BLOCK — fix the confirmed findings before merging."
+        exit 1
+
+branding:
+  icon: "shield"
+  color: "blue"

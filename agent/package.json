@@ -1,0 +1,1 @@
+{"dependencies":{"ai":"^7.0.111"},"description":"Node bridge: Jev adjudication for the jev-backend-qa LangChain agent","name":"jev-backend-qa-agent","private":true,"type":"module","version":"1.0.0"}

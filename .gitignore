@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+node_modules/
+.env
+.DS_Store
+qa-report*.md
+findings*.json
